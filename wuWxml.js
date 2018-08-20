@@ -5,6 +5,7 @@ const fs=require('fs');
 const path=require("path");
 const esprima=require('esprima');
 const {VM}=require('vm2');
+const escodegen=require('escodegen');
 function analyze(core,z,namePool,xPool,fakePool={},zMulName="0"){
 	function anaRecursion(core,fakePool={}){
 		return analyze(core,z,namePool,xPool,fakePool,zMulName);
@@ -38,7 +39,7 @@ function analyze(core,z,namePool,xPool,fakePool={},zMulName="0"){
 								let item=f.arguments[6].value;//def:item
 								let index=f.arguments[7].value;//def:index
 								let data=z[f.arguments[0].value];
-								let key=f.arguments[8].value;//def:""
+								let key=escodegen.generate(f.arguments[8]).slice(1,-1);//f.arguments[8].value;//def:""
 								let obj=namePool[f.arguments[5].name];
 								let gen=namePool[f.arguments[1].name];
 								if(gen.tag=="gen"){
@@ -56,7 +57,7 @@ function analyze(core,z,namePool,xPool,fakePool={},zMulName="0"){
 								let item=f.arguments[7].value;//def:item
 								let index=f.arguments[8].value;//def:index
 								let data=z.mul[zMulName][f.arguments[1].value];
-								let key=f.arguments[9].value;//def:""
+								let key=escodegen.generate(f.arguments[9]).slice(1,-1);//f.arguments[9].value;//def:""
 								let obj=namePool[f.arguments[6].name];
 								let gen=namePool[f.arguments[2].name];
 								if(gen.tag=="gen"){
@@ -186,8 +187,8 @@ function analyze(core,z,namePool,xPool,fakePool={},zMulName="0"){
 							default:
 							{
 								let funName=dec.init.callee.name;
-								if(funName.startsWith("gz$gwx_")){
-									zMulName=funName.slice(7);
+								if(funName.startsWith("gz$gwx")){
+									zMulName=funName.slice(6);
 								}else throw Error("Unknown init callee "+funName);
 							}
 						}
@@ -237,7 +238,7 @@ function analyze(core,z,namePool,xPool,fakePool={},zMulName="0"){
 	}
 }
 function wxmlify(str,isText){
-	if(typeof str=="undefined"||str===null)throw Error("Empty str in "+(isText?"text":"prop"));
+	if(typeof str=="undefined"||str===null)return "Empty";//throw Error("Empty str in "+(isText?"text":"prop"));
 	if(isText)return str;//may have some bugs in some specific case(undocumented by tx)
 	else return str.replace(/"/g, '\\"');
 }
@@ -302,7 +303,7 @@ function elemToString(elem,dep,moreInfo=false){
 	rets.push(indent.repeat(dep)+"</"+elem.tag+">\n");
 	return trimMerge(rets);
 }
-function doWxml(dir,name,code,z,xPool,rDs,wxsList,moreInfo){
+function doWxml(state,dir,name,code,z,xPool,rDs,wxsList,moreInfo){
 	let rname=code.slice(code.lastIndexOf("return")+6).replace(/[\;\}]/g,"").trim();
 	code=code.slice(code.indexOf("\n"),code.lastIndexOf("return")).trim();
 	let r={son:[]};
@@ -311,9 +312,17 @@ function doWxml(dir,name,code,z,xPool,rDs,wxsList,moreInfo){
 	for(let elem of r.son)ans.push(elemToString(elem,0,moreInfo));
 	let result=[ans.join("")];
 	for(let v in rDs){
-		let code=rDs[v].toString();
-		let rname=code.slice(code.lastIndexOf("return")+6).replace(/[\;\}]/g,"").trim();
-		code=code.slice(code.indexOf("\ntry{")+5,code.lastIndexOf("\n}catch(")).trim();
+		state[0]=v;
+		let oriCode=rDs[v].toString();
+		let rname=oriCode.slice(oriCode.lastIndexOf("return")+6).replace(/[\;\}]/g,"").trim();
+		let tryPtr=oriCode.indexOf("\ntry{");
+		let zPtr=oriCode.indexOf("var z=gz$gwx");
+		let code=oriCode.slice(tryPtr+5,oriCode.lastIndexOf("\n}catch(")).trim();
+		if(zPtr!=-1&&tryPtr>zPtr){
+			let attach=oriCode.slice(zPtr);
+			attach=attach.slice(0,attach.indexOf("()"))+"()\n";
+			code=attach+code;
+		}
 		let r={tag:"template",v:{name:v},son:[]};
 		analyze(esprima.parseScript(code).body,z,{[rname]:r},xPool,{[rname]:r});
 		result.unshift(elemToString(r,0,moreInfo));
@@ -322,14 +331,16 @@ function doWxml(dir,name,code,z,xPool,rDs,wxsList,moreInfo){
 	if(wxsList[name])result.push(wxsList[name]);
 	wu.save(name,result.join(""));
 }
-function tryWxml(dir,name,code,...args){
+function tryWxml(dir,name,code,z,xPool,rDs,...args){
 	console.log("Decompile "+name+"...");
+	let state=[null];
 	try{
-		doWxml(dir,name,code,...args);
+		doWxml(state,dir,name,code,z,xPool,rDs,...args);
 		console.log("Decompile success!");
 	}catch(e){
-		console.log("error on "+name+"\nerr: ",e);
-		wu.save(path.resolve(dir,name+".ori.js"),code);
+		console.log("error on "+name+"("+(state[0]===null?"Main":"Template-"+state[0])+")\nerr: ",e);
+		if(state[0]===null)wu.save(path.resolve(dir,name+".ori.js"),code);
+		else wu.save(path.resolve(dir,name+".tem-"+state[0]+".ori.js"),rDs[state[0]].toString());
 	}
 }
 function doWxs(code){
